@@ -85,30 +85,26 @@ class FileManager:
             if not destination_folder:
                 return False, None
             
-            # LOGGING ONLY MODE - SKIP ACTUAL VALIDATION FOR NOW
-            self.logger.info(f"[LOGGING MODE] Would validate destination folder: {destination_folder}")
+            # REAL MODE - ACTUAL FILE VALIDATION AND MOVE
+            self.logger.info(f"Validating destination folder: {destination_folder}")
             
-            # Validate destination folder exists - COMMENTED OUT
-            # if not self.validate_destination_folder(destination_folder):
-            #     self.logger.error(f"Destination folder does not exist: {destination_folder}")
-            #     return False, None
+            # Validate destination folder exists
+            if not self.validate_destination_folder(destination_folder):
+                self.logger.error(f"Destination folder does not exist: {destination_folder}")
+                return False, None
             
             # Construct full destination path
             destination_path = os.path.join(destination_folder, new_filename)
             
-            # LOGGING ONLY MODE - SKIP FILE EXISTENCE CHECK
-            self.logger.info(f"[LOGGING MODE] Would check if file exists at: {destination_path}")
+            # Check if file already exists at destination
+            self.logger.info(f"Checking if file exists at: {destination_path}")
+            if os.path.exists(destination_path):
+                self.logger.error(f"File already exists at destination: {destination_path}")
+                return False, None
             
-            # Check if file already exists at destination - COMMENTED OUT
-            # if os.path.exists(destination_path):
-            #     self.logger.error(f"File already exists at destination: {destination_path}")
-            #     return False, None
-            
-            # LOGGING ONLY MODE - DON'T ACTUALLY MOVE FILE
-            self.logger.info(f"[LOGGING MODE] Would move file: {original_file_path} -> {destination_path}")
-            
-            # Perform the move and rename - COMMENTED OUT
-            # shutil.move(original_file_path, destination_path)
+            # Perform the actual move and rename
+            self.logger.info(f"Moving file: {original_file_path} -> {destination_path}")
+            shutil.move(original_file_path, destination_path)
             
             # Log the operation
             original_filename = os.path.basename(original_file_path)

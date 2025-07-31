@@ -114,14 +114,14 @@ class ProcessingPipeline:
             self.processing_state['record_id'] = client_record['id']
             self.logger.info(f"[VALIDATION] Client record found: {client_record['id']}")
             
-            # LOGGING ONLY MODE - SKIP FOLDER VALIDATION
+            # REAL MODE - ACTUAL FOLDER VALIDATION
             destination_folder = self.file_manager.construct_client_folder_path(client_name_formatted)
-            self.logger.info(f"[VALIDATION] Would validate destination folder: {destination_folder}")
+            self.logger.info(f"[VALIDATION] Validating destination folder: {destination_folder}")
             
-            # Validate destination folder exists - COMMENTED OUT FOR LOGGING MODE
-            # if not destination_folder or not self.file_manager.validate_destination_folder(destination_folder):
-            #     self.logger.error(f"Destination folder does not exist: {destination_folder}")
-            #     return False
+            # Validate destination folder exists
+            if not destination_folder or not self.file_manager.validate_destination_folder(destination_folder):
+                self.logger.error(f"Destination folder does not exist: {destination_folder}")
+                return False
             
             # Validate new filename can be generated
             new_filename = self.file_manager.generate_new_filename(client_name)
@@ -131,14 +131,13 @@ class ProcessingPipeline:
             
             self.logger.info(f"[VALIDATION] Generated filename: {new_filename}")
             
-            # LOGGING ONLY MODE - SKIP FILE EXISTENCE CHECK
+            # Check if file would already exist at destination
             new_file_path = os.path.join(destination_folder, new_filename)
-            self.logger.info(f"[VALIDATION] Would check if file exists at: {new_file_path}")
+            self.logger.info(f"[VALIDATION] Checking if file exists at: {new_file_path}")
             
-            # Check if file would already exist at destination - COMMENTED OUT
-            # if os.path.exists(new_file_path):
-            #     self.logger.error(f"File already exists at destination: {new_file_path}")
-            #     return False
+            if os.path.exists(new_file_path):
+                self.logger.error(f"File already exists at destination: {new_file_path}")
+                return False
             
             self.logger.info(f"[VALIDATION] All validations passed for {client_name_formatted}")
             return True

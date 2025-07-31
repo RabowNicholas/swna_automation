@@ -16,39 +16,35 @@ class AirtableClient:
         Returns record dict or None if not found.
         """
         try:
-            # LOGGING ONLY MODE - ACTUAL SEARCH COMMENTED OUT
-            self.logger.info(f"[LOGGING MODE] Would search Airtable for client: {client_name_formatted}")
+            # REAL MODE - ACTUAL AIRTABLE SEARCH
+            self.logger.info(f"Searching Airtable for client: {client_name_formatted}")
             
-            # Search for exact match in the Name field - COMMENTED OUT
-            # records = self.table.all(formula=f"{{Name}} = '{client_name_formatted}'")
+            # Search for records that start with the client name (handles SSN suffix)
+            # First try exact match
+            records = self.table.all(formula=f"{{Name}} = '{client_name_formatted}'")
             
-            # Simulate finding a record for logging purposes
-            simulated_record = {
-                'id': 'rec123456789',
-                'fields': {
-                    'Name': client_name_formatted,
-                    'Case ID': '',
-                    'Log': 'Previous log entries...'
-                }
-            }
+            # If no exact match, try prefix match for names with SSN suffix
+            if not records:
+                # Search for names that start with "Last, First" (may have " - SSSS" suffix)
+                prefix_formula = f"LEFT({{Name}}, {len(client_name_formatted)}) = '{client_name_formatted}'"
+                records = self.table.all(formula=prefix_formula)
+                if records:
+                    self.logger.info(f"Found client using prefix match (likely has SSN suffix)")
             
-            self.logger.info(f"[LOGGING MODE] Simulated finding client record: {simulated_record['id']}")
-            self.logger.log_client_matched(client_name_formatted, simulated_record['id'])
-            return simulated_record
+            records = records or []
             
-            # Original logic commented out:
-            # if records:
-            #     if len(records) == 1:
-            #         record = records[0]
-            #         self.logger.log_client_matched(client_name_formatted, record['id'])
-            #         return record
-            #     else:
-            #         # Multiple matches found - this shouldn't happen with exact matching
-            #         self.logger.error(f"Multiple client records found for: {client_name_formatted}")
-            #         return None
-            # else:
-            #     self.logger.debug(f"No client record found for: {client_name_formatted}")
-            #     return None
+            if records:
+                if len(records) == 1:
+                    record = records[0]
+                    self.logger.log_client_matched(client_name_formatted, record['id'])
+                    return record
+                else:
+                    # Multiple matches found - this shouldn't happen with exact matching
+                    self.logger.error(f"Multiple client records found for: {client_name_formatted}")
+                    return None
+            else:
+                self.logger.debug(f"No client record found for: {client_name_formatted}")
+                return None
                 
         except Exception as e:
             self.logger.error(f"Airtable client search failed: {str(e)}")
@@ -60,20 +56,17 @@ class AirtableClient:
         Returns True if successful, False otherwise.
         """
         try:
-            # LOGGING ONLY MODE - ACTUAL UPDATE COMMENTED OUT
-            self.logger.info(f"[LOGGING MODE] Would get current record: {record_id}")
+            # REAL MODE - ACTUAL AIRTABLE UPDATE
+            self.logger.info(f"Getting current record: {record_id}")
             
             # Get current record to check existing data
-            # current_record = self.table.get(record_id)
-            # current_fields = current_record.get('fields', {})
-            
-            # Simulate current fields for logging
-            current_fields = {'Case ID': '', 'Log': 'Previous log entries...'}
+            current_record = self.table.get(record_id)
+            current_fields = current_record.get('fields', {})
             
             # Check if Case ID already exists and matches
             existing_case_id = current_fields.get('Case ID', '')
             if existing_case_id == case_id:
-                self.logger.info(f"[LOGGING MODE] Case ID {case_id} already exists for record {record_id} - would skip update")
+                self.logger.info(f"Case ID {case_id} already exists for record {record_id} - skipping update")
                 return True
             
             # Prepare update data
@@ -83,9 +76,9 @@ class AirtableClient:
             # Get existing log content
             existing_log = current_fields.get('Log', '')
             
-            # Append new log entry
+            # Prepend new log entry to the beginning
             if existing_log:
-                new_log = f"{existing_log}\n{log_entry}"
+                new_log = f"{log_entry}\n{existing_log}"
             else:
                 new_log = log_entry
             
@@ -95,11 +88,11 @@ class AirtableClient:
                 'Log': new_log
             }
             
-            # Log what would be updated
-            self.logger.info(f"[LOGGING MODE] Would update Airtable record {record_id} with: {update_data}")
+            # Log what will be updated
+            self.logger.info(f"Updating Airtable record {record_id} with: {update_data}")
             
-            # Perform update - COMMENTED OUT FOR LOGGING MODE
-            # updated_record = self.table.update(record_id, update_data)
+            # Perform actual update
+            updated_record = self.table.update(record_id, update_data)
             self.logger.log_airtable_updated(record_id, case_id)
             
             return True
