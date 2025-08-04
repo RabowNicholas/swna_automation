@@ -1,5 +1,6 @@
 import os
 import shutil
+from typing import Dict, Any
 from src.document_processor import DocumentProcessor
 from src.data_extractor import DataExtractor
 from src.airtable_client import AirtableClient
@@ -20,6 +21,14 @@ class ProcessingPipeline:
         
         # Track processing state for rollback
         self.processing_state = {}
+        
+        # Track daily statistics
+        self.daily_stats = {
+            'processed': 0,
+            'ignored': 0, 
+            'failed': 0,
+            'total': 0
+        }
     
     def process_file(self, file_path):
         """
@@ -29,9 +38,17 @@ class ProcessingPipeline:
         """
         filename = os.path.basename(file_path)
         
+        # Track total files processed
+        self.daily_stats['total'] += 1
+        
         # Add separator line for readability
         self.logger.info("=" * 80)
-        self.logger.log_file_processing_start(filename)
+        
+        # Start performance tracking
+        processing_timer = self.logger.start_timer(f"file_processing_{filename}")
+        
+        # Log processing start with structured data
+        self.logger.log_file_processing_start(filename, file_path)
         
         # Initialize processing state
         self.processing_state = {
@@ -52,27 +69,32 @@ class ProcessingPipeline:
             is_ar_ack, extracted_text = self.document_processor.process_document(file_path)
             
             if not is_ar_ack:
-                self.logger.debug(f"Document is not AR Ack, skipping: {filename}")
-                self.logger.info("=" * 80)
+                self.daily_stats['ignored'] += 1
+                self.logger.log_file_ignored(filename, "Not AR Ack document", file_path)
+                # End performance tracking
+                self.logger.end_timer(processing_timer)
                 return True  # Not an error, just not our target document type
             
             # Step 3: Extract data (Case ID and Client Name)
             case_id, client_name = self.data_extractor.extract_all_data(extracted_text)
             
             if not case_id or not client_name:
-                self._handle_processing_failure(filename, "Failed to extract required data (Case ID or Client Name)")
+                self._handle_processing_failure(filename, "Failed to extract required data (Case ID or Client Name)", file_path, processing_timer)
+                self.daily_stats['failed'] += 1
                 return False
             
             # Step 4: Format client name for Airtable matching
             client_name_formatted = self.data_extractor.format_client_name_for_matching(client_name)
             
             if not client_name_formatted:
-                self._handle_processing_failure(filename, "Failed to format client name for matching")
+                self._handle_processing_failure(filename, "Failed to format client name for matching", file_path, processing_timer)
+                self.daily_stats['failed'] += 1
                 return False
             
             # Step 5: Validate all required operations can be performed
             if not self._validate_all_operations(client_name, client_name_formatted):
-                self._handle_processing_failure(filename, "Pre-validation failed")
+                self._handle_processing_failure(filename, "Pre-validation failed", file_path, processing_timer)
+                self.daily_stats['failed'] += 1
                 return False
             
             # Step 6: Execute all operations atomically
@@ -81,19 +103,48 @@ class ProcessingPipeline:
             )
             
             if success:
-                self.logger.log_file_processing_success(filename, case_id, client_name)
-                self.logger.info("=" * 80)
+                # Get the new filename and destination for audit log
+                new_filename = self.file_manager.generate_new_filename(client_name)
+                destination_folder = os.path.basename(self.file_manager.construct_client_folder_path(client_name_formatted))
+                
+                # Log successful processing with audit details
+                self.logger.log_file_processing_success(filename, case_id, client_name, new_filename, destination_folder, file_path)
+                
+                # Log Airtable update details
+                from datetime import datetime
+                current_date = datetime.now().strftime("%m.%d.%y")
+                log_entry = f"Rcvd AR Ack. Filed Away. {current_date} AI"
+                update_data = {
+                    "Case ID": case_id,
+                    "Log": log_entry
+                }
+                self.logger.log_airtable_update_details(client_name, self.processing_state['record_id'], case_id, log_entry, update_data)
+                
+                # Log file move operation
+                if self.processing_state.get('new_file_path'):
+                    self.logger.log_file_moved(file_path, self.processing_state['new_file_path'], filename, new_filename)
+                
+                # End performance tracking
+                duration = self.logger.end_timer(processing_timer)
+                self.logger.info(f"File processing completed in {duration:.2f} seconds")
+                
+                self.daily_stats['processed'] += 1
                 return True
             else:
                 self._rollback_operations()
-                self._handle_processing_failure(filename, "Atomic operations failed")
-                self.logger.info("=" * 80)
+                self._handle_processing_failure(filename, "Atomic operations failed", file_path, processing_timer)
+                self.daily_stats['failed'] += 1
                 return False
                 
         except Exception as e:
             self._rollback_operations()
-            self._handle_processing_failure(filename, f"Unexpected error: {str(e)}")
-            self.logger.info("=" * 80)
+            error_details = {
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+                "processing_state": self.processing_state.copy()
+            }
+            self._handle_processing_failure(filename, f"Unexpected error: {str(e)}", file_path, processing_timer, error_details)
+            self.daily_stats['failed'] += 1
             return False
     
     def _validate_all_operations(self, client_name, client_name_formatted):
@@ -107,12 +158,19 @@ class ProcessingPipeline:
             # Validate client exists in Airtable
             client_record = self.airtable_client.find_client_by_name(client_name_formatted)
             if not client_record:
-                self.logger.error(f"Client not found in Airtable: {client_name_formatted}")
+                self.logger.log_validation_result("airtable_client_lookup", False, {
+                    "client_name": client_name_formatted,
+                    "message": f"Client not found in Airtable: {client_name_formatted}"
+                })
                 return False
             
             # Store record ID for later use
             self.processing_state['record_id'] = client_record['id']
-            self.logger.info(f"[VALIDATION] Client record found: {client_record['id']}")
+            self.logger.log_validation_result("airtable_client_lookup", True, {
+                "client_name": client_name_formatted,
+                "record_id": client_record['id'],
+                "message": f"Client record found: {client_record['id']}"
+            })
             
             # REAL MODE - ACTUAL FOLDER VALIDATION
             destination_folder = self.file_manager.construct_client_folder_path(client_name_formatted)
@@ -120,26 +178,42 @@ class ProcessingPipeline:
             
             # Validate destination folder exists
             if not destination_folder or not self.file_manager.validate_destination_folder(destination_folder):
-                self.logger.error(f"Destination folder does not exist: {destination_folder}")
+                self.logger.log_validation_result("destination_folder", False, {
+                    "client_name": client_name_formatted,
+                    "destination_folder": destination_folder,
+                    "message": f"Destination folder does not exist: {destination_folder}"
+                })
                 return False
             
             # Validate new filename can be generated
             new_filename = self.file_manager.generate_new_filename(client_name)
             if not new_filename:
-                self.logger.error("Cannot generate new filename")
+                self.logger.log_validation_result("filename_generation", False, {
+                    "client_name": client_name,
+                    "message": "Cannot generate new filename"
+                })
                 return False
-            
-            self.logger.info(f"[VALIDATION] Generated filename: {new_filename}")
             
             # Check if file would already exist at destination
             new_file_path = os.path.join(destination_folder, new_filename)
-            self.logger.info(f"[VALIDATION] Checking if file exists at: {new_file_path}")
             
             if os.path.exists(new_file_path):
-                self.logger.error(f"File already exists at destination: {new_file_path}")
+                self.logger.log_validation_result("file_conflict", False, {
+                    "client_name": client_name_formatted,
+                    "new_file_path": new_file_path,
+                    "message": f"File already exists at destination: {new_file_path}"
+                })
                 return False
             
-            self.logger.info(f"[VALIDATION] All validations passed for {client_name_formatted}")
+            # All validations passed
+            self.logger.log_validation_result("complete_validation", True, {
+                "client_name": client_name_formatted,
+                "destination_folder": destination_folder,
+                "new_filename": new_filename,
+                "new_file_path": new_file_path,
+                "message": f"All validations passed for {client_name_formatted}"
+            })
+            
             return True
             
         except Exception as e:
@@ -203,15 +277,29 @@ class ProcessingPipeline:
         except Exception as e:
             self.logger.error(f"Rollback operations failed: {str(e)}")
     
-    def _handle_processing_failure(self, filename, reason):
-        """Handle processing failure with proper logging."""
-        self.logger.log_file_processing_failure(filename, reason)
+    def _handle_processing_failure(self, filename: str, reason: str, file_path: str = None, 
+                                  timer_id: str = None, error_details: Dict[str, Any] = None):
+        """Handle processing failure with proper logging and performance tracking."""
+        # End performance tracking if timer provided
+        if timer_id:
+            try:
+                duration = self.logger.end_timer(timer_id)
+                self.logger.info(f"File processing failed after {duration:.2f} seconds")
+            except:
+                pass  # Timer may have already been ended
+        
+        # Log the failure with structured data
+        self.logger.log_file_processing_failure(filename, reason, file_path, error_details)
+    
+    def log_daily_summary(self):
+        """Log daily processing summary."""
+        self.logger.log_daily_summary(
+            processed_count=self.daily_stats['processed'],
+            ignored_count=self.daily_stats['ignored'], 
+            failed_count=self.daily_stats['failed'],
+            total_count=self.daily_stats['total']
+        )
     
     def get_processing_stats(self):
-        """Get basic processing statistics (for future use)."""
-        # This could be expanded to track success/failure rates
-        return {
-            'total_processed': 0,
-            'successful': 0,
-            'failed': 0
-        }
+        """Get current processing statistics."""
+        return self.daily_stats.copy()

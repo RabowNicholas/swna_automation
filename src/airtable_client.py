@@ -63,12 +63,6 @@ class AirtableClient:
             current_record = self.table.get(record_id)
             current_fields = current_record.get('fields', {})
             
-            # Check if Case ID already exists and matches
-            existing_case_id = current_fields.get('Case ID', '')
-            if existing_case_id == case_id:
-                self.logger.info(f"Case ID {case_id} already exists for record {record_id} - skipping update")
-                return True
-            
             # Prepare update data
             current_date = datetime.now().strftime("%m.%d.%y")
             log_entry = f"Rcvd AR Ack. Filed Away. {current_date} AI"
@@ -82,11 +76,19 @@ class AirtableClient:
             else:
                 new_log = log_entry
             
-            # Update fields
-            update_data = {
-                'Case ID': case_id,
-                'Log': new_log
-            }
+            # Check if Case ID already exists and matches
+            existing_case_id = current_fields.get('Case ID', '')
+            if existing_case_id == case_id:
+                # Case ID is correct, but still update Log field
+                update_data = {'Log': new_log}
+                self.logger.info(f"Case ID {case_id} already correct for record {record_id} - updating Log only")
+            else:
+                # Case ID needs updating, update both fields
+                update_data = {
+                    'Case ID': case_id,
+                    'Log': new_log
+                }
+                self.logger.info(f"Updating both Case ID and Log for record {record_id}")
             
             # Log what will be updated
             self.logger.info(f"Updating Airtable record {record_id} with: {update_data}")
