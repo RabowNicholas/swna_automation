@@ -122,8 +122,8 @@ class DocumentProcessor:
                 return True, text
             else:
                 self.logger.debug(f"Document is not an AR Ack: {pdf_path}")
-                self.logger.debug(f"[DEBUG] Looking for signature text in document...")
-                return False, None
+                # Now return the text for all documents to enable multi-document classification
+                return False, text
                 
         except Exception as e:
             self.logger.error(f"Document processing failed for {pdf_path}: {str(e)}")

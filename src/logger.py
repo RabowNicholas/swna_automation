@@ -276,18 +276,30 @@ class SWNALogger:
         self._write_structured_log(audit_entry, self.audit_log_file)
     
     def log_daily_summary(self, processed_count: int, ignored_count: int, failed_count: int, 
-                         total_count: int, date_str: str = None):
+                         total_count: int, renamed_count: int = 0, by_type_count: Dict[str, int] = None, 
+                         date_str: str = None):
         """Log daily processing summary with structured data."""
         if not date_str:
             date_str = datetime.now().strftime("%m.%d.%y")
+        
+        if by_type_count is None:
+            by_type_count = {}
             
         # Traditional log
         self.info("=" * 50)
         self.info(f"=== DAILY SUMMARY {date_str} ===")
-        self.info(f"• Processed: {processed_count} AR Ack documents")
-        self.info(f"• Ignored: {ignored_count} non-AR Ack files")
+        self.info(f"• Processed: {processed_count} AR Ack documents (full processing)")
+        self.info(f"• Renamed: {renamed_count} other document types (rename only)")
+        self.info(f"• Ignored: {ignored_count} unknown document types")
         self.info(f"• Failed: {failed_count} processing errors")
         self.info(f"• Total files scanned: {total_count}")
+        
+        # Document type breakdown
+        if by_type_count:
+            self.info("--- Document Type Breakdown ---")
+            for doc_type, count in sorted(by_type_count.items()):
+                self.info(f"  • {doc_type}: {count}")
+        
         self.info("=" * 50)
         
         # Structured audit log
@@ -297,10 +309,12 @@ class SWNALogger:
             "date": date_str,
             "statistics": {
                 "processed_count": processed_count,
+                "renamed_count": renamed_count,
                 "ignored_count": ignored_count,
                 "failed_count": failed_count,
                 "total_count": total_count,
-                "success_rate": round(processed_count / total_count * 100, 2) if total_count > 0 else 0
+                "by_type_count": by_type_count,
+                "success_rate": round((processed_count + renamed_count) / total_count * 100, 2) if total_count > 0 else 0
             }
         })
         

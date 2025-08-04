@@ -1,9 +1,10 @@
 import re
 from config.settings import CASE_ID_PATTERN, CLIENT_NAME_PATTERN
 from src.logger import SWNALogger
+from src.document_classifier import DocumentType
 
 class DataExtractor:
-    """Extract Case ID and Client Name from AR Acknowledgment documents."""
+    """Extract Case ID and Client Name from various document types."""
     
     def __init__(self, logger=None):
         self.logger = logger or SWNALogger()
@@ -144,3 +145,42 @@ class DataExtractor:
         except Exception as e:
             self.logger.error(f"Client name formatting failed: {str(e)}")
             return None
+    
+    def extract_data_for_document_type(self, text, document_type: DocumentType):
+        """
+        Extract data appropriate for the given document type.
+        For all document types, we need at least client name.
+        For AR Ack, we also need case ID.
+        
+        Returns (case_id, client_name) tuple.
+        """
+        # Always try to extract client name for all document types
+        client_name = self.extract_client_name(text)
+        
+        if document_type == DocumentType.AR_ACK:
+            # AR Ack requires both case ID and client name
+            case_id = self.extract_case_id(text)
+            return case_id, client_name
+        else:
+            # Other document types: client name is required, case ID is optional
+            case_id = self.extract_case_id(text)  # Try to get it but don't fail if missing
+            return case_id, client_name
+    
+    def validate_extraction_for_document_type(self, case_id, client_name, document_type: DocumentType):
+        """
+        Validate that we have the minimum required data for the document type.
+        
+        Args:
+            case_id: Extracted case ID (may be None)
+            client_name: Extracted client name (may be None)
+            document_type: The document type being processed
+            
+        Returns:
+            True if we have minimum required data, False otherwise
+        """
+        if document_type == DocumentType.AR_ACK:
+            # AR Ack requires both case ID and client name
+            return case_id is not None and client_name is not None
+        else:
+            # Other document types only require client name
+            return client_name is not None

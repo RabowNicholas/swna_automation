@@ -6,34 +6,42 @@ from src.data_extractor import DataExtractor
 from src.airtable_client import AirtableClient
 from src.file_manager import FileManager
 from src.logger import SWNALogger
+from src.document_classifier import DocumentClassifier, DocumentType
+from src.document_renamer import DocumentRenamer
 
 class ProcessingPipeline:
-    """Main processing pipeline with atomic operations for AR Ack documents."""
+    """Main processing pipeline with atomic operations for multiple document types."""
     
     def __init__(self, logger=None):
         self.logger = logger or SWNALogger()
         
-        # Initialize components
+        # Initialize existing components
         self.document_processor = DocumentProcessor(self.logger)
         self.data_extractor = DataExtractor(self.logger)
         self.airtable_client = AirtableClient(self.logger)
         self.file_manager = FileManager(self.logger)
+        
+        # Initialize new components for multi-document processing
+        self.document_classifier = DocumentClassifier(self.logger)
+        self.document_renamer = DocumentRenamer(self.logger)
         
         # Track processing state for rollback
         self.processing_state = {}
         
         # Track daily statistics
         self.daily_stats = {
-            'processed': 0,
-            'ignored': 0, 
-            'failed': 0,
-            'total': 0
+            'processed': 0,       # AR Ack documents (full processing)
+            'renamed': 0,         # Other document types (rename only)
+            'ignored': 0,         # Unknown document types
+            'failed': 0,          # Processing failures
+            'total': 0,           # Total files scanned
+            'by_type': {}         # Count by document type
         }
     
     def process_file(self, file_path):
         """
-        Process a single PDF file through the complete pipeline.
-        All operations are atomic - either all succeed or all are rolled back.
+        Process a single PDF file through the multi-document pipeline.
+        AR Ack documents get full processing, other types get rename-only processing.
         Returns True if successful, False if failed.
         """
         filename = os.path.basename(file_path)
@@ -55,6 +63,7 @@ class ProcessingPipeline:
             'original_file_path': file_path,
             'airtable_updated': False,
             'file_moved': False,
+            'file_renamed': False,
             'new_file_path': None,
             'record_id': None
         }
@@ -63,27 +72,78 @@ class ProcessingPipeline:
             # Step 1: Check if file is already processed
             if self.file_manager.is_already_processed_file(filename):
                 self.logger.debug(f"File already processed, skipping: {filename}")
+                self.logger.end_timer(processing_timer)
                 return True
             
-            # Step 2: Process document and check if it's AR Ack
+            # Step 2: Extract text from document
             is_ar_ack, extracted_text = self.document_processor.process_document(file_path)
             
-            if not is_ar_ack:
-                self.daily_stats['ignored'] += 1
-                self.logger.log_file_ignored(filename, "Not AR Ack document", file_path)
-                # End performance tracking
-                self.logger.end_timer(processing_timer)
-                return True  # Not an error, just not our target document type
-            
-            # Step 3: Extract data (Case ID and Client Name)
-            case_id, client_name = self.data_extractor.extract_all_data(extracted_text)
-            
-            if not case_id or not client_name:
-                self._handle_processing_failure(filename, "Failed to extract required data (Case ID or Client Name)", file_path, processing_timer)
+            if not extracted_text:
+                self._handle_processing_failure(filename, "Failed to extract text from document", file_path, processing_timer)
                 self.daily_stats['failed'] += 1
                 return False
             
-            # Step 4: Format client name for Airtable matching
+            # Step 3: Classify document type
+            classification_result = self.document_classifier.classify_document(extracted_text)
+            document_type = classification_result.document_type
+            
+            # Update stats by document type
+            type_name = document_type.value
+            self.daily_stats['by_type'][type_name] = self.daily_stats['by_type'].get(type_name, 0) + 1
+            
+            self.logger.info(f"📋 CLASSIFIED: {filename} as {type_name} (confidence: {classification_result.confidence:.2f})")
+            
+            if document_type == DocumentType.UNKNOWN:
+                # Unknown document type - ignore
+                self.daily_stats['ignored'] += 1
+                self.logger.log_file_ignored(filename, f"Unknown document type: {classification_result.classification_reason}", file_path)
+                self.logger.end_timer(processing_timer)
+                return True
+            
+            # Step 4: Extract data based on document type
+            case_id, client_name = self.data_extractor.extract_data_for_document_type(extracted_text, document_type)
+            
+            # Step 5: Validate we have minimum required data
+            if not self.data_extractor.validate_extraction_for_document_type(case_id, client_name, document_type):
+                required = "Case ID and Client Name" if document_type == DocumentType.AR_ACK else "Client Name"
+                self._handle_processing_failure(filename, f"Failed to extract required data ({required})", file_path, processing_timer)
+                self.daily_stats['failed'] += 1
+                return False
+            
+            # Step 6: Route to appropriate processing path
+            if document_type == DocumentType.AR_ACK:
+                # AR Ack: Full processing (existing logic)
+                success = self._process_ar_ack_document(file_path, case_id, client_name, processing_timer)
+            else:
+                # Other document types: Rename-only processing
+                success = self._process_other_document(file_path, document_type, classification_result, client_name, processing_timer)
+            
+            # End performance tracking
+            duration = self.logger.end_timer(processing_timer)
+            self.logger.info(f"File processing completed in {duration:.2f} seconds")
+            
+            return success
+                
+        except Exception as e:
+            self._rollback_operations()
+            error_details = {
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+                "processing_state": self.processing_state.copy()
+            }
+            self._handle_processing_failure(filename, f"Unexpected error: {str(e)}", file_path, processing_timer, error_details)
+            self.daily_stats['failed'] += 1
+            return False
+    
+    def _process_ar_ack_document(self, file_path, case_id, client_name, processing_timer):
+        """
+        Process AR Ack document with full processing (existing logic).
+        Returns True if successful, False if failed.
+        """
+        filename = os.path.basename(file_path)
+        
+        try:
+            # Format client name for Airtable matching
             client_name_formatted = self.data_extractor.format_client_name_for_matching(client_name)
             
             if not client_name_formatted:
@@ -91,13 +151,13 @@ class ProcessingPipeline:
                 self.daily_stats['failed'] += 1
                 return False
             
-            # Step 5: Validate all required operations can be performed
+            # Validate all required operations can be performed
             if not self._validate_all_operations(client_name, client_name_formatted):
                 self._handle_processing_failure(filename, "Pre-validation failed", file_path, processing_timer)
                 self.daily_stats['failed'] += 1
                 return False
             
-            # Step 6: Execute all operations atomically
+            # Execute all operations atomically
             success = self._execute_atomic_operations(
                 file_path, case_id, client_name, client_name_formatted
             )
@@ -124,10 +184,6 @@ class ProcessingPipeline:
                 if self.processing_state.get('new_file_path'):
                     self.logger.log_file_moved(file_path, self.processing_state['new_file_path'], filename, new_filename)
                 
-                # End performance tracking
-                duration = self.logger.end_timer(processing_timer)
-                self.logger.info(f"File processing completed in {duration:.2f} seconds")
-                
                 self.daily_stats['processed'] += 1
                 return True
             else:
@@ -138,12 +194,54 @@ class ProcessingPipeline:
                 
         except Exception as e:
             self._rollback_operations()
-            error_details = {
-                "exception_type": type(e).__name__,
-                "exception_message": str(e),
-                "processing_state": self.processing_state.copy()
-            }
-            self._handle_processing_failure(filename, f"Unexpected error: {str(e)}", file_path, processing_timer, error_details)
+            self._handle_processing_failure(filename, f"AR Ack processing error: {str(e)}", file_path, processing_timer)
+            self.daily_stats['failed'] += 1
+            return False
+    
+    def _process_other_document(self, file_path, document_type, classification_result, client_name, processing_timer):
+        """
+        Process non-AR Ack documents with rename-only processing.
+        Returns True if successful, False if failed.
+        """
+        filename = os.path.basename(file_path)
+        
+        try:
+            # Generate new filename based on document type
+            new_filename = self.document_renamer.generate_filename(classification_result, client_name)
+            
+            # Get directory of original file (stays in temp folder)
+            original_dir = os.path.dirname(file_path)
+            new_file_path = os.path.join(original_dir, new_filename)
+            
+            # Check if target filename already exists
+            if os.path.exists(new_file_path):
+                self._handle_processing_failure(filename, f"Target filename already exists: {new_filename}", file_path, processing_timer)
+                self.daily_stats['failed'] += 1
+                return False
+            
+            # Rename the file
+            os.rename(file_path, new_file_path)
+            self.processing_state['file_renamed'] = True
+            self.processing_state['new_file_path'] = new_file_path
+            
+            # Log successful renaming
+            case_id = classification_result.extracted_data.get('case_id')
+            self.logger.info(f"🔄 RENAMED: {filename} → {new_filename} | Type: {document_type.value} | Client: {client_name}")
+            
+            # Log structured data for the renamed document
+            self.logger.log_file_processing_success(
+                filename, case_id, client_name, new_filename, 
+                "Temp Folder (Renamed Only)", file_path
+            )
+            
+            # Log file move operation (though it's a rename in same directory)
+            self.logger.log_file_moved(file_path, new_file_path, filename, new_filename)
+            
+            self.daily_stats['renamed'] += 1
+            return True
+            
+        except Exception as e:
+            self._handle_processing_failure(filename, f"Document renaming error: {str(e)}", file_path, processing_timer)
             self.daily_stats['failed'] += 1
             return False
     
@@ -257,7 +355,7 @@ class ProcessingPipeline:
         Rollback any operations that were performed if the pipeline fails.
         """
         try:
-            # If file was moved, move it back
+            # If file was moved (AR Ack processing), move it back
             if self.processing_state.get('file_moved') and self.processing_state.get('new_file_path'):
                 original_path = self.processing_state['original_file_path']
                 new_path = self.processing_state['new_file_path']
@@ -268,6 +366,18 @@ class ProcessingPipeline:
                         self.logger.info(f"Rolled back file move: {new_path} -> {original_path}")
                 except Exception as e:
                     self.logger.error(f"Failed to rollback file move: {str(e)}")
+            
+            # If file was renamed (other document types), rename it back
+            elif self.processing_state.get('file_renamed') and self.processing_state.get('new_file_path'):
+                original_path = self.processing_state['original_file_path']
+                new_path = self.processing_state['new_file_path']
+                
+                try:
+                    if os.path.exists(new_path):
+                        os.rename(new_path, original_path)
+                        self.logger.info(f"Rolled back file rename: {new_path} -> {original_path}")
+                except Exception as e:
+                    self.logger.error(f"Failed to rollback file rename: {str(e)}")
             
             # Note: Airtable rollback is complex and not implemented in this version
             # In production, you might want to store the original values and restore them
@@ -297,7 +407,9 @@ class ProcessingPipeline:
             processed_count=self.daily_stats['processed'],
             ignored_count=self.daily_stats['ignored'], 
             failed_count=self.daily_stats['failed'],
-            total_count=self.daily_stats['total']
+            total_count=self.daily_stats['total'],
+            renamed_count=self.daily_stats['renamed'],
+            by_type_count=self.daily_stats['by_type']
         )
     
     def get_processing_stats(self):

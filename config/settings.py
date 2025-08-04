@@ -17,8 +17,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # Document Processing Patterns
 AR_ACK_SIGNATURE = "According to our records, you have been designated as the authorized representative in the above case. As the authorized representative, you have the ability to receive correspondence, submit additional evidence, argue factual or legal issues and exercise claimant rights pertaining to the above claim."
 
-CASE_ID_PATTERN = r'Case ID Number:\s*(\d+)'
-CLIENT_NAME_PATTERN = r'Employee Name:\s*([^\n\r]+)'
+CASE_ID_PATTERN = r'(?:Case ID Number|CASE ID|Case ID):\s*(\d+)'
+CLIENT_NAME_PATTERN = r'(?:Employee Name|EMPLOYEE):\s*([^\n\r]+)'
 
 # Validation
 def validate_config():
