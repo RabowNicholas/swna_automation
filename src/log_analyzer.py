@@ -110,10 +110,14 @@ class LogAnalyzer:
         query = LogQuery(start_date=start_time)
         return self.query_audit_logs(query)
     
-    def get_processing_stats(self, date: str = None, include_details: bool = False) -> Dict[str, Any]:
+    def get_processing_stats(self, date: str = None, include_details: bool = False, 
+                           filters: Dict[str, Any] = None) -> Dict[str, Any]:
         """Get processing statistics for a specific date or today."""
         if date is None:
             date = datetime.now().strftime("%Y-%m-%d")
+        
+        if filters is None:
+            filters = {}
         
         start_date = f"{date}T00:00:00"
         end_date = f"{date}T23:59:59"
@@ -124,19 +128,23 @@ class LogAnalyzer:
         stats = {
             "date": date,
             "total_files": 0,
-            "processed": 0,
-            "ignored": 0,
-            "failed": 0,
+            "processed": 0,        # AR Ack documents (full processing)
+            "renamed": 0,          # Other document types (rename only)
+            "ignored": 0,          # Unknown document types
+            "failed": 0,           # Processing failures
             "airtable_updates": 0,
             "file_moves": 0,
             "unique_clients": set(),
             "unique_cases": set(),
-            "errors": []
+            "errors": [],
+            "document_types": {},  # Count by document type
+            "classification_data": []  # Classification details
         }
         
         # Add detailed action lists if requested
         if include_details:
-            stats["processed_files"] = []
+            stats["processed_files"] = []   # AR Ack (full processing)
+            stats["renamed_files"] = []     # Other types (rename only)
             stats["ignored_files"] = []
             stats["failed_files"] = []
         
@@ -147,34 +155,72 @@ class LogAnalyzer:
             if action == "processing_started":
                 stats["total_files"] += 1
             elif status == "SUCCESS" and entry.get("action_type") == "file_processed":
-                stats["processed"] += 1
-                if include_details:
-                    stats["processed_files"].append({
-                        "filename": entry.get("new_filename", entry.get("filename", "")),
-                        "original_filename": entry.get("original_filename", ""),
-                        "case_id": entry.get("case_id", ""),
-                        "client_name": entry.get("client_name", ""),
-                        "timestamp": entry.get("timestamp", ""),
-                        "destination_folder": entry.get("destination_folder", "")
-                    })
+                # Check if this was a rename-only operation or full processing
+                destination = entry.get("destination_folder", "")
+                if "Temp Folder (Renamed Only)" in destination:
+                    stats["renamed"] += 1
+                    if include_details:
+                        file_info = {
+                            "filename": entry.get("new_filename", entry.get("filename", "")),
+                            "original_filename": entry.get("original_filename", ""),
+                            "case_id": entry.get("case_id", ""),
+                            "client_name": entry.get("client_name", ""),
+                            "timestamp": entry.get("timestamp", ""),
+                            "document_type": entry.get("document_type", ""),
+                            "confidence": entry.get("classification_confidence", 0.0),
+                            "classification_reason": entry.get("classification_reason", "")
+                        }
+                        # Apply filters
+                        if self._matches_filters(file_info, filters):
+                            stats["renamed_files"].append(file_info)
+                else:
+                    stats["processed"] += 1
+                    if include_details:
+                        file_info = {
+                            "filename": entry.get("new_filename", entry.get("filename", "")),
+                            "original_filename": entry.get("original_filename", ""),
+                            "case_id": entry.get("case_id", ""),
+                            "client_name": entry.get("client_name", ""),
+                            "timestamp": entry.get("timestamp", ""),
+                            "destination_folder": entry.get("destination_folder", ""),
+                            "document_type": "AR Ack",
+                            "confidence": 1.0
+                        }
+                        # Apply filters
+                        if self._matches_filters(file_info, filters):
+                            stats["processed_files"].append(file_info)
+                
+                # Track document types
+                doc_type = entry.get("document_type", "AR Ack")
+                stats["document_types"][doc_type] = stats["document_types"].get(doc_type, 0) + 1
+                
             elif status == "IGNORED":
                 stats["ignored"] += 1
                 if include_details:
-                    stats["ignored_files"].append({
+                    file_info = {
                         "filename": entry.get("filename", ""),
                         "reason": entry.get("ignore_reason", ""),
-                        "timestamp": entry.get("timestamp", "")
-                    })
+                        "timestamp": entry.get("timestamp", ""),
+                        "document_type": entry.get("document_type", "Unknown"),
+                        "confidence": entry.get("classification_confidence", 0.0)
+                    }
+                    # Apply filters
+                    if self._matches_filters(file_info, filters):
+                        stats["ignored_files"].append(file_info)
+                        
             elif status == "FAILED":
                 stats["failed"] += 1
                 error_info = {
                     "filename": entry.get("filename", ""),
                     "reason": entry.get("failure_reason", ""),
-                    "timestamp": entry.get("timestamp", "")
+                    "timestamp": entry.get("timestamp", ""),
+                    "document_type": entry.get("document_type", ""),
+                    "confidence": entry.get("classification_confidence", 0.0)
                 }
                 stats["errors"].append(error_info)
-                if include_details:
+                if include_details and self._matches_filters(error_info, filters):
                     stats["failed_files"].append(error_info)
+                    
             elif entry.get("action_type") == "airtable_update":
                 stats["airtable_updates"] += 1
             elif entry.get("action_type") == "file_moved":
@@ -192,6 +238,27 @@ class LogAnalyzer:
         
         return stats
     
+    def _matches_filters(self, file_info: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """Check if file_info matches the provided filters."""
+        if not filters:
+            return True
+            
+        # Document type filter
+        if filters.get("document_type"):
+            if file_info.get("document_type", "").lower() != filters["document_type"].lower():
+                return False
+        
+        # Confidence filters
+        confidence = file_info.get("confidence", 0.0)
+        if filters.get("min_confidence") is not None:
+            if confidence < filters["min_confidence"]:
+                return False
+        if filters.get("max_confidence") is not None:
+            if confidence > filters["max_confidence"]:
+                return False
+                
+        return True
+    
     def format_verbose_stats(self, stats: Dict[str, Any], filter_type: str = "all") -> str:
         """Format processing stats with verbose details for specific action types."""
         output = []
@@ -199,7 +266,14 @@ class LogAnalyzer:
         # Header with summary
         output.append(f"Processing stats for {stats['date']}:")
         output.append(f"Total: {stats['total_files']}, Processed: {stats['processed']}, "
-                     f"Ignored: {stats['ignored']}, Failed: {stats['failed']}")
+                     f"Renamed: {stats.get('renamed', 0)}, Ignored: {stats['ignored']}, Failed: {stats['failed']}")
+        
+        # Document type breakdown
+        if stats.get('document_types'):
+            output.append(f"\nDocument Types:")
+            for doc_type, count in sorted(stats['document_types'].items()):
+                output.append(f"  • {doc_type}: {count}")
+        
         output.append("")
         
         # Show filtered results
@@ -217,6 +291,24 @@ class LogAnalyzer:
                 client_name = file_info["client_name"]
                 
                 output.append(f"[{timestamp}] ✅ {filename} | Case: {case_id} | Client: {client_name}")
+            output.append("")
+        
+        if filter_type in ["all", "renamed"] and stats.get("renamed_files"):
+            if filter_type == "renamed":
+                output.append(f"Showing RENAMED files only ({len(stats['renamed_files'])} of {stats['total_files']} total)")
+            else:
+                output.append("RENAMED FILES:")
+            output.append("")
+            
+            for file_info in stats["renamed_files"]:
+                timestamp = file_info["timestamp"][:16] if file_info["timestamp"] else "Unknown"
+                filename = file_info["filename"] or file_info["original_filename"]
+                case_id = file_info.get("case_id", "None")
+                client_name = file_info["client_name"]
+                doc_type = file_info.get("document_type", "Unknown")
+                confidence = file_info.get("confidence", 0.0)
+                
+                output.append(f"[{timestamp}] 🔄 {filename} | Type: {doc_type} ({confidence:.2f}) | Case: {case_id} | Client: {client_name}")
             output.append("")
         
         if filter_type in ["all", "ignored"] and stats.get("ignored_files"):
@@ -343,8 +435,11 @@ def main():
     parser.add_argument("--case", help="Case ID to search for")
     parser.add_argument("--limit", type=int, help="Limit number of results")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed file information for stats action")
-    parser.add_argument("--filter", choices=["all", "processed", "ignored", "failed"], default="all",
+    parser.add_argument("--filter", choices=["all", "processed", "ignored", "failed", "renamed"], default="all",
                        help="Filter results by action type (use with --verbose, default: all)")
+    parser.add_argument("--document-type", help="Filter by document type (e.g., 'AR Ack', 'EN16', 'EE-11A')")
+    parser.add_argument("--min-confidence", type=float, help="Minimum classification confidence (0.0-1.0)")
+    parser.add_argument("--max-confidence", type=float, help="Maximum classification confidence (0.0-1.0)")
     
     args = parser.parse_args()
     
@@ -357,17 +452,32 @@ def main():
             print(f"[{entry.get('timestamp', '')[:16]}] {entry.get('action', '')} - {entry.get('status', '')}")
     
     elif args.action == "stats":
+        # Build filters from command line arguments
+        filters = {}
+        if getattr(args, 'document_type', None):
+            filters['document_type'] = args.document_type
+        if getattr(args, 'min_confidence', None) is not None:
+            filters['min_confidence'] = args.min_confidence
+        if getattr(args, 'max_confidence', None) is not None:
+            filters['max_confidence'] = args.max_confidence
+            
         if args.verbose:
             # Get detailed stats and format with verbose output
-            stats = analyzer.get_processing_stats(args.date, include_details=True)
+            stats = analyzer.get_processing_stats(args.date, include_details=True, filters=filters)
             formatted_output = analyzer.format_verbose_stats(stats, args.filter)
             print(formatted_output)
         else:
-            # Simple stats output (original behavior)
-            stats = analyzer.get_processing_stats(args.date)
+            # Simple stats output (enhanced with document types)
+            stats = analyzer.get_processing_stats(args.date, filters=filters)
             print(f"Processing stats for {stats['date']}:")
             print(f"Total: {stats['total_files']}, Processed: {stats['processed']}, "
-                  f"Ignored: {stats['ignored']}, Failed: {stats['failed']}")
+                  f"Renamed: {stats.get('renamed', 0)}, Ignored: {stats['ignored']}, Failed: {stats['failed']}")
+            
+            # Show document type breakdown
+            if stats.get('document_types'):
+                print(f"\nDocument Types:")
+                for doc_type, count in sorted(stats['document_types'].items()):
+                    print(f"  • {doc_type}: {count}")
     
     elif args.action == "client":
         if not args.client:

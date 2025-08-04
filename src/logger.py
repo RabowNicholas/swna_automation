@@ -159,8 +159,10 @@ class SWNALogger:
         self._write_structured_log(audit_entry, self.audit_log_file)
     
     def log_file_processing_success(self, filename: str, case_id: str, client_name: str, 
-                                   new_filename: str, destination_folder: str, file_path: str = None):
-        """Log successful AR Ack processing with complete audit trail."""
+                                   new_filename: str, destination_folder: str, file_path: str = None,
+                                   document_type: str = None, classification_confidence: float = None,
+                                   classification_reason: str = None):
+        """Log successful file processing with complete audit trail and classification data."""
         # Traditional log  
         self.info(f"✅ PROCESSED: {new_filename} | Case: {case_id} | Client: {client_name} | Action: Filed to {destination_folder}")
         
@@ -174,6 +176,9 @@ class SWNALogger:
             "client_name": client_name,
             "destination_folder": destination_folder,
             "file_path": file_path,
+            "document_type": document_type,
+            "classification_confidence": classification_confidence,
+            "classification_reason": classification_reason,
             "status": "SUCCESS"
         })
         
@@ -198,7 +203,9 @@ class SWNALogger:
         
         self._write_structured_log(audit_entry, self.audit_log_file)
     
-    def log_file_ignored(self, filename: str, reason: str, file_path: str = None):
+    def log_file_ignored(self, filename: str, reason: str, file_path: str = None,
+                        document_type: str = None, classification_confidence: float = None,
+                        classification_reason: str = None):
         """Log when file is ignored with structured data."""
         # Traditional log
         self.info(f"❌ IGNORED: {filename} | Reason: {reason}")
@@ -210,6 +217,9 @@ class SWNALogger:
             "filename": filename,
             "file_path": file_path,
             "ignore_reason": reason,
+            "document_type": document_type,
+            "classification_confidence": classification_confidence,
+            "classification_reason": classification_reason,
             "status": "IGNORED"
         })
         

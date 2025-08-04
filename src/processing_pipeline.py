@@ -96,7 +96,10 @@ class ProcessingPipeline:
             if document_type == DocumentType.UNKNOWN:
                 # Unknown document type - ignore
                 self.daily_stats['ignored'] += 1
-                self.logger.log_file_ignored(filename, f"Unknown document type: {classification_result.classification_reason}", file_path)
+                self.logger.log_file_ignored(filename, f"Unknown document type: {classification_result.classification_reason}", file_path,
+                                            document_type=document_type.value, 
+                                            classification_confidence=classification_result.confidence,
+                                            classification_reason=classification_result.classification_reason)
                 self.logger.end_timer(processing_timer)
                 return True
             
@@ -168,7 +171,9 @@ class ProcessingPipeline:
                 destination_folder = os.path.basename(self.file_manager.construct_client_folder_path(client_name_formatted))
                 
                 # Log successful processing with audit details
-                self.logger.log_file_processing_success(filename, case_id, client_name, new_filename, destination_folder, file_path)
+                self.logger.log_file_processing_success(filename, case_id, client_name, new_filename, destination_folder, file_path,
+                                                       document_type="AR Ack", classification_confidence=1.0, 
+                                                       classification_reason="AR Ack signature matched")
                 
                 # Log Airtable update details
                 from datetime import datetime
@@ -231,7 +236,10 @@ class ProcessingPipeline:
             # Log structured data for the renamed document
             self.logger.log_file_processing_success(
                 filename, case_id, client_name, new_filename, 
-                "Temp Folder (Renamed Only)", file_path
+                "Temp Folder (Renamed Only)", file_path,
+                document_type=document_type.value, 
+                classification_confidence=classification_result.confidence,
+                classification_reason=classification_result.classification_reason
             )
             
             # Log file move operation (though it's a rename in same directory)
